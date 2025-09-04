@@ -1,13 +1,30 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "CommonJS",
+    "target": "ES2022",
+    "module": "Node16",
     "rootDir": "src",
     "outDir": "dist",
     "strict": true,
+    "types": [
+      "node"
+    ],
     "esModuleInterop": true,
-    "jsx": "react-jsx"
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "moduleResolution": "Node16",
+    "typeRoots": [
+      "./src/types",
+      "./node_modules/@types"
+    ],
+    "resolveJsonModule": true,
+    "isolatedModules": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }

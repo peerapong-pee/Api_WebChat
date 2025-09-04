@@ -10,8 +10,8 @@ class SignInRoutes {
     }
 
     intializeRoutes() {
+        this.router.post("/register", this.controller.Register);
 
-        this.router.post("/signin", this.controller.Signin);
     }
 }
 

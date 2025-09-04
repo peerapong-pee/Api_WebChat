@@ -8,25 +8,32 @@ dotenv.config();
 const secret = process.env.JWT_SECRET || "mysecretkey";
 
 export default class SigninController {
-  // ✅ Signin ด้วย accounts (email + ticket)
-  async Signin(req: Request, res: Response<apiResponse>): Promise<Response<apiResponse>> {
-    try {
-      // รองรับทั้งรูปแบบเก่า (user/password) และใหม่ (email/ticket)
-      const email = (req.body.email ?? req.body.user ?? "").toString().trim();
-      const ticket = (req.body.ticket ?? req.body.password ?? "").toString();
 
-      if (!email || !ticket) {
+  //#region Register
+  async Register(req: Request, res: Response<apiResponse>): Promise<Response<apiResponse>> {
+    try {
+      const rawUsername = (req.body.username ?? "").toString().trim();
+      const rawEmail = (req.body.email ?? "").toString().trim();
+      const rawFullname = (req.body.fullname ?? "").toString().trim();
+      const rawTicket = (req.body.ticket ?? req.body.password ?? "").toString();
+
+      if (!rawUsername || !rawEmail || !rawTicket) {
+        const missing = [
+          !rawUsername ? "username" : null,
+          !rawEmail ? "email" : null,
+          !rawTicket ? "ticket" : null,
+        ].filter(Boolean).join(", ");
         return res.status(400).json({
           success: false,
-          message: !email && !ticket
-            ? "กรุณากรอกอีเมลและรหัสบัตร (ticket)"
-            : !email
-              ? "กรุณากรอกอีเมล"
-              : "กรุณากรอกรหัสบัตร (ticket)",
+          message: `กรุณากรอกข้อมูลให้ครบถ้วน: ${missing}`,
           statusCode: 400,
         });
       }
 
+      const username = rawUsername.toLowerCase();
+      const email = rawEmail.toLowerCase();
+      const fullname = rawFullname || username;
+      const ticket = rawTicket;
       const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailPattern.test(email)) {
         return res.status(400).json({
@@ -36,51 +43,84 @@ export default class SigninController {
         });
       }
 
-      // ✅ ใช้ accounts + เช็ค ticket ด้วย SHA2(?,512)
-      const [rows] = await pool.query<any[]>(
-        `SELECT id, username, email, fullname
-           FROM accounts
-          WHERE email = ?
-            AND ticket = SHA2(?, 512)`,
-        [email, ticket]
+      const usernamePattern = /^[a-z0-9_]{3,24}$/;
+      if (!usernamePattern.test(username)) {
+        return res.status(400).json({
+          success: false,
+          message: "username ต้องเป็น a-z, 0-9, _ และยาว 3–24 ตัวอักษร",
+          statusCode: 400,
+        });
+      }
+      
+      const [dup] = await pool.query<any[]>(
+        `SELECT 
+            SUM(CASE WHEN email = ? THEN 1 ELSE 0 END) AS email_dup,
+            SUM(CASE WHEN username = ? THEN 1 ELSE 0 END) AS user_dup
+         FROM accounts
+         WHERE email = ? OR username = ?`,
+        [email, username, email, username]
       );
-
-      if (!Array.isArray(rows) || rows.length === 0) {
-        return res.status(200).json({ success: false, message: "อีเมลหรือรหัสไม่ถูกต้อง", statusCode: 200 });
+      const dupRow = Array.isArray(dup) && dup[0] ? dup[0] : { email_dup: 0, user_dup: 0 };
+      if (dupRow.email_dup > 0 || dupRow.user_dup > 0) {
+        const errs = [];
+        if (dupRow.email_dup > 0) errs.push("อีเมลนี้ถูกใช้งานแล้ว");
+        if (dupRow.user_dup > 0) errs.push("username นี้ถูกใช้งานแล้ว");
+        return res.status(409).json({
+          success: false,
+          message: errs.join(", "),
+          statusCode: 409,
+        });
       }
 
-      const u = rows[0];
-      // สร้าง token (หากยังต้องใช้)
+      const [result] = await pool.query<any>(
+        `INSERT INTO accounts (username, email, fullname, ticket)
+         VALUES (?, ?, ?, SHA2(?, 512))`,
+        [username, email, fullname, ticket]
+      );
+
+      const newId = result.insertId as number;
       const token = jwt.sign(
-        { id: u.id, email: u.email, username: u.username, role: u.username === "admin" ? "admin" : "user" },
+        { id: newId, email, username, role: username === "admin" ? "admin" : "user" },
         secret,
         { expiresIn: "1h" }
       );
 
-      // ถ้าใช้ session ในระบบแชท แนะนำเก็บไว้ด้วย
       (req.session as any).user = {
-        id: u.id,
-        email: u.email,
-        username: u.username,
-        fullname: u.fullname,
-        isAdmin: u.username === "admin",
+        id: newId,
+        email,
+        username,
+        fullname,
+        isAdmin: username === "admin",
       };
 
-      return res.status(200).json({
+      return res.status(201).json({
         success: true,
-        message: "เข้าสู่ระบบสำเร็จ",
+        message: "สมัครสมาชิกสำเร็จ",
         data: {
-          users_id: u.id,              // รักษา key ชื่อเดิมให้ client ไม่พัง
+          users_id: newId,
           token,
-          firstname: u.fullname,       // ไม่มี firstname ใน accounts → map fullname
-          total_credit: 0              // ไม่มีใน accounts → ให้ค่า 0/ตัดออกจาก type ถ้าแก้ได้
+          firstname: fullname,
         },
-        statusCode: 200,
+        statusCode: 201,
       });
 
-    } catch (error) {
-      console.error(error);
-      return res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดขณะเข้าสู่ระบบ", statusCode: 500 });
+    } catch (err: any) {
+      if (err && err.code === "ER_DUP_ENTRY") {
+        const msg = /for key '.*email.*/i.test(err.sqlMessage || "")
+          ? "อีเมลนี้ถูกใช้งานแล้ว"
+          : /for key '.*username.*/i.test(err.sqlMessage || "")
+            ? "username นี้ถูกใช้งานแล้ว"
+            : "ข้อมูลซ้ำกับที่มีอยู่แล้ว";
+        return res.status(409).json({ success: false, message: msg, statusCode: 409 });
+      }
+
+      console.error(err);
+      return res.status(500).json({
+        success: false,
+        message: "เกิดข้อผิดพลาดขณะสมัครสมาชิก",
+        statusCode: 500,
+      });
     }
   }
+  //#endregion
 }
