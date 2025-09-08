@@ -6,8 +6,6 @@ import path from "path";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import mysql from "mysql2/promise";
-
-import authRoutes from "./auth";
 import Routes from "./routes";
 import { pusher } from "./pusher";
 
@@ -102,10 +100,8 @@ const pusherAuthLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
-app.use("/login", loginLimiter);
-app.use("/pusher/auth", pusherAuthLimiter);
-app.use(authRoutes);
 app.use(Routes);
+app.use("/pusher/auth", pusherAuthLimiter);
 
 app.post("/api/broadcast", async (req, res) => {
   const user = (req.session as any).user;
