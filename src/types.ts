@@ -2,6 +2,7 @@ export interface SessionUser {
   id: number;
   email: string;
   username: string;
-  fullname: string;
+  firstname: string;
+  lastname: string;
   isAdmin: boolean;
 }

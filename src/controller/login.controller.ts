@@ -26,7 +26,7 @@ export default class logininController {
     try {
       // ใช้ TRIM/LOWER ทั้งฝั่ง SQL เพื่อกันช่องว่าง/เคส
       const [rows] = await pool.query<any[]>(
-        "SELECT id, username, email, fullname, password FROM accounts WHERE TRIM(LOWER(email)) = ? LIMIT 1",
+        "SELECT id, username, email, firstname, lastname, password FROM accounts WHERE TRIM(LOWER(email)) = ? LIMIT 1",
         [userEmail]
       );
 
@@ -47,7 +47,8 @@ export default class logininController {
         id: row.id,
         email: row.email,
         username: row.username,
-        fullname: row.fullname,
+        firstname: row.firstname,
+        lastname: row.lastname,
         isAdmin: row.username === "admin",
       };
 
@@ -77,7 +78,8 @@ export default class logininController {
     try {
       const rawUsername = (req.body.username ?? "").toString().trim();
       const rawEmail = (req.body.email ?? "").toString().trim();
-      const rawFullname = (req.body.fullname ?? "").toString().trim();
+      const rawFisstname = (req.body.firstname ?? "").toString().trim();
+      const rawLastname = (req.body.lastname ?? "").toString().trim();
       const rawTicket = (req.body.ticket ?? req.body.password ?? "").toString();
 
       if (!rawUsername || !rawEmail || !rawTicket) {
@@ -95,7 +97,8 @@ export default class logininController {
 
       const username = rawUsername.toLowerCase();
       const email = rawEmail.toLowerCase();
-      const fullname = rawFullname || username;
+      const firstname = rawFisstname;
+      const lastname = rawLastname;
       const ticket = rawTicket;
 
       const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -139,9 +142,9 @@ export default class logininController {
       const hashed = await bcrypt.hash(ticket, 10);
 
       const [result] = await pool.query<any>(
-        `INSERT INTO accounts (username, email, fullname, password)
-         VALUES (?, ?, ?, ?)`,
-        [username, email, fullname, hashed]
+        `INSERT INTO accounts (username, email, firstname, lastname, password)
+         VALUES (?, ?, ?, ?, ?)`,
+        [username, email, firstname, lastname, hashed]
       );
 
       const newId = (result as any).insertId as number;
@@ -155,7 +158,8 @@ export default class logininController {
         id: newId,
         email,
         username,
-        fullname,
+        firstname,
+        lastname,
         isAdmin: username === "admin",
       };
 
@@ -165,7 +169,8 @@ export default class logininController {
         data: {
           users_id: newId,
           token,
-          firstname: fullname,
+          firstname,
+          lastname,
         },
         statusCode: 201,
       });
