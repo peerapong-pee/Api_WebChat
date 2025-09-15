@@ -151,8 +151,9 @@ export default class pusherAuthController {
                 conn.release();
 
                 const payload = {
+                    message_id: messageId,
                     from: user.username,
-                    sender_id: user.id,      
+                    sender_id: user.id,
                     text: trimmed,
                     at: Date.now(),
                 };
@@ -198,40 +199,52 @@ export default class pusherAuthController {
 
     //#region getMessages
     // getMessages (เวอร์ชันแก้ alias ซ้ำ)
-    getMessages = async (req: Request, res: Response<ApiResponse>) => {
-        const me = (req.session as any).user as SessionUser | undefined;
-        if (!me) {
-            return res.status(401).json({ success: false, message: "Not authenticated", statusCode: 401 });
-        }
+    // ---------- getMessages (fixed: no window function) ----------
+getMessages = async (req: Request, res: Response<ApiResponse>) => {
+  const me = (req.session as any).user as SessionUser | undefined;
+  if (!me) {
+    return res.status(401).json({ success: false, message: "Not authenticated", statusCode: 401 });
+  }
 
-        const cid = Number((req.query as any).conversationId ?? 0);
-        const limit = Math.min(Number((req.query as any).limit ?? 50), 100);
-        const beforeId = Number((req.query as any).beforeId ?? 0);
+  const cid = Number((req.query as any).conversationId ?? 0);
+  const limit = Math.min(Number((req.query as any).limit ?? 50), 100);
+  const beforeId = Number((req.query as any).beforeId ?? 0);
 
-        if (!cid) {
-            return res.status(400).json({ success: false, message: "Bad request", statusCode: 400 });
-        }
+  if (!cid) {
+    return res.status(400).json({ success: false, message: "Bad request", statusCode: 400 });
+  }
 
-        // ตรวจ membership
-        const [mem] = await pool.query<any[]>(
-            `SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ? LIMIT 1`,
-            [cid, me.id]
-        );
-        if (mem.length === 0) {
-            return res.status(403).json({ success: false, message: "Forbidden", statusCode: 403 });
-        }
+  // check membership
+  const [mem] = await pool.query<any[]>(
+    `SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ? LIMIT 1`,
+    [cid, me.id]
+  );
+  if (mem.length === 0) {
+    return res.status(403).json({ success: false, message: "Forbidden", statusCode: 403 });
+  }
 
-        const params: any[] = [cid];
-        let cursorSql = "";
-        if (beforeId > 0) {
-            cursorSql = "AND m.id < ? ";
-            params.push(beforeId);
-        }
-        params.push(limit);
+  // build seek cursor
+  let cursorSql = "";
+  const params: any[] = [];
 
-        // ใช้ alias ไม่ซ้ำ: u=accounts, att=attachments
-        const [rows] = await pool.query<any[]>(
-            `
+  // IMPORTANT: order of params must follow the order of "?" in SQL.
+  // 1) first "?" is for the subquery (max_message_id)
+  params.push(cid);
+
+  // 2) second "?" is for WHERE m.conversation_id = ?
+  params.push(cid);
+
+  if (beforeId > 0) {
+    cursorSql = "AND m.id < ? ";
+    // 3) third "?" (optional) is for beforeId
+    params.push(beforeId);
+  }
+
+  // 4) last "?" is for LIMIT ?
+  params.push(limit);
+
+  const [rows] = await pool.query<any[]>(
+    `
     SELECT
       m.id,
       m.conversation_id,
@@ -243,46 +256,46 @@ export default class pusherAuthController {
       m.edited_at,
       COALESCE(
         JSON_ARRAYAGG(
-          CASE WHEN att.id IS NULL THEN NULL ELSE
+          CASE WHEN a.id IS NULL THEN NULL ELSE
             JSON_OBJECT(
-              'id', att.id,
-              'type', att.type,
-              'url', att.url,
-              'file_name', att.file_name,
-              'mime_type', att.mime_type,
-              'byte_size', att.byte_size,
-              'width', att.width,
-              'height', att.height,
-              'duration_sec', att.duration_sec
+              'id', a.id,
+              'type', a.type,
+              'url', a.url,
+              'file_name', a.file_name,
+              'mime_type', a.mime_type,
+              'byte_size', a.byte_size,
+              'width', a.width,
+              'height', a.height,
+              'duration_sec', a.duration_sec
             )
           END
         ),
         JSON_ARRAY()
-      ) AS attachments
+      ) AS attachments,
+      (SELECT MAX(id) FROM messages WHERE conversation_id = ?) AS max_message_id
     FROM messages m
-    JOIN accounts u ON u.id = m.sender_id              -- << เปลี่ยนเป็น u
-    LEFT JOIN attachments att ON att.message_id = m.id -- << เปลี่ยนเป็น att
+    LEFT JOIN attachments a ON a.message_id = m.id
+    LEFT JOIN accounts u ON u.id = m.sender_id
     WHERE m.conversation_id = ?
       AND m.deleted_at IS NULL
       ${cursorSql}
-    GROUP BY
-      m.id, m.conversation_id, m.sender_id, u.username, m.body, m.kind, m.created_at, m.edited_at
+    GROUP BY m.id
     ORDER BY m.id DESC
     LIMIT ?
     `,
-            params
-        );
+    params
+  );
 
-        // เรียงกลับเป็นเก่า→ใหม่ให้ UI
-        const messages = rows.reverse();
+  // UI ต้องการเรียงเก่า->ใหม่
+  const messages = rows.reverse();
 
-        return res.json({
-            success: true,
-            data: { messages },
-            message: "OK",
-            statusCode: 200,
-        });
-    };
+  return res.json({
+    success: true,
+    data: { messages },
+    message: "OK",
+    statusCode: 200,
+  });
+};
 
     //#endregion
 
@@ -427,4 +440,76 @@ export default class pusherAuthController {
     };
     //#endregion
 
+    //#region markRead
+    markRead = async (req: Request, res: Response<ApiResponse>) => {
+        const me = (req.session as any).user as SessionUser | undefined;
+        if (!me) return res.status(401).json({ success: false, statusCode: 401, message: "Not authenticated" });
+
+        const { conversationId, lastReadMessageId } = req.body ?? {};
+        const cid = Number(conversationId || 0);
+        const lastId = Number(lastReadMessageId || 0);
+        if (!cid) return res.status(400).json({ success: false, statusCode: 400, message: "Bad request" });
+
+        // ยืนยันว่าเป็นสมาชิกห้องนั้น
+        const [mem] = await pool.query<any[]>(
+            `SELECT 1 FROM conversation_members WHERE conversation_id=? AND user_id=? LIMIT 1`,
+            [cid, me.id]
+        );
+        if (mem.length === 0) {
+            return res.status(403).json({ success: false, statusCode: 403, message: "Forbidden" });
+        }
+
+        // upsert last read
+        await pool.query(
+            `
+    INSERT INTO conversation_reads (conversation_id, user_id, last_read_message_id)
+    VALUES (?, ?, ?)
+    ON DUPLICATE KEY UPDATE last_read_message_id = GREATEST(last_read_message_id, VALUES(last_read_message_id))
+    `,
+            [cid, me.id, lastId]
+        );
+
+        return res.json({ success: true, statusCode: 200, message: "OK" });
+    };
+    //#endregion
+
+    //#region unreadSummary
+    unreadSummary = async (req: Request, res: Response<ApiResponse>) => {
+        const me = (req.session as any).user as SessionUser | undefined;
+        if (!me) return res.status(401).json({ success: false, statusCode: 401, message: "Not authenticated" });
+
+        const [rows] = await pool.query<any[]>(
+            `
+    WITH my_reads AS (
+      SELECT r.conversation_id, COALESCE(r.last_read_message_id, 0) AS last_read_message_id
+      FROM conversation_reads r
+      WHERE r.user_id = ?
+    ),
+    my_dms AS (
+      SELECT c.id AS conversation_id,
+             (SELECT cm2.user_id
+              FROM conversation_members cm2
+              WHERE cm2.conversation_id = c.id AND cm2.user_id <> ?) AS peer_id
+      FROM conversations c
+      JOIN conversation_members cm ON cm.conversation_id = c.id AND cm.user_id = ?
+      WHERE c.type = 'dm'
+    )
+    SELECT
+      d.conversation_id AS conversationId,
+      d.peer_id AS peerId,
+      COALESCE(
+        (SELECT COUNT(1) FROM messages m
+         WHERE m.conversation_id = d.conversation_id
+           AND m.id > COALESCE((SELECT last_read_message_id FROM my_reads r WHERE r.conversation_id = d.conversation_id), 0)
+           AND m.sender_id <> ?  -- นับเฉพาะข้อความคนอื่น
+        ), 0
+      ) AS unread
+    FROM my_dms d
+    `,
+            [me.id, me.id, me.id, me.id]
+        );
+
+        return res.json({ success: true, statusCode: 200, message: "OK", data: { items: rows } });
+    };
+    //#endregion
 }
