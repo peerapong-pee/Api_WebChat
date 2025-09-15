@@ -167,7 +167,7 @@ export default class logininController {
         success: true,
         message: "สมัครสมาชิกสำเร็จ",
         data: {
-          users_id: newId,
+          id: newId,
           token,
           firstname,
           lastname,
@@ -214,11 +214,14 @@ export default class logininController {
           .json({ success: false, message: "กรุณากรอกอีเมล", statusCode: 400 });
       }
 
+      // ✅ ใช้ accounts + id
       const [rows] = await pool.query<any[]>(
-        "SELECT users_id, email, firstname FROM users WHERE email = ? LIMIT 1",
+        "SELECT id, email, firstname FROM accounts WHERE email = ? LIMIT 1",
         [email]
       );
-      if (rows.length === 0) {
+
+      if (!rows || rows.length === 0) {
+        // จะตอบ success เพื่อลด user enumeration ก็ได้ แต่ตามเดิมของคุณ:
         return res
           .status(200)
           .json({ success: false, message: "ไม่พบผู้ใช้งานนี้", statusCode: 200 });
@@ -226,39 +229,41 @@ export default class logininController {
 
       const user = rows[0];
       const resetToken = crypto.randomBytes(32).toString("hex");
-
-      const resetLink = `${process.env.CLIENT_URL}/signin_signout/reset-password?token=${resetToken}`;
+      const resetLink = `${process.env.FRONTEND_URL}/signin_signout/reset-password?token=${resetToken}`;
 
       await pool.query(
-        "UPDATE users SET reset_token = ?, reset_token_expire = DATE_ADD(NOW(), INTERVAL 1 HOUR) WHERE users_id = ?",
-        [resetToken, user.users_id]
+        "UPDATE accounts SET reset_token = ?, reset_token_expire = DATE_ADD(NOW(), INTERVAL 1 HOUR) WHERE id = ?",
+        [resetToken, user.id]
       );
 
       const transporter = nodemailer.createTransport({
-        service: "gmail",
+        host: "smtp.gmail.com",
+        port: 465,
+        secure: true,
         auth: {
           user: process.env.MAIL_USER,
-          pass: process.env.MAIL_PASS,
+          pass: process.env.MAIL_PASS, // ต้องเป็น App Password
         },
       });
 
       await transporter.sendMail({
-        from: `"MBT Support" <${process.env.MAIL_USER}>`,
+        from: `"MBT WebChat" <${process.env.MAIL_USER}>`,
         to: email,
         subject: "รีเซ็ตรหัสผ่าน - MBT",
         html: `
-          <p>คุณได้ส่งคำขอรีเซ็ตรหัสผ่าน</p>
-          <p>กรุณาคลิกลิงก์ด้านล่างเพื่อดำเนินการ (ลิงก์หมดอายุใน 1 ชั่วโมง):</p>
-          <p><a href="${resetLink}">${resetLink}</a></p>
-          <p>หากคุณไม่ได้ทำรายการนี้ กรุณาเพิกเฉยอีเมลฉบับนี้</p>
-        `,
+        <p>คุณได้ส่งคำขอรีเซ็ตรหัสผ่าน</p>
+        <p>กรุณาคลิกลิงก์ด้านล่างเพื่อดำเนินการ (ลิงก์หมดอายุใน 1 ชั่วโมง):</p>
+        <p><a href="${resetLink}">${resetLink}</a></p>
+        <p>หากคุณไม่ได้ทำรายการนี้ กรุณาเพิกเฉยอีเมลฉบับนี้</p>
+      `,
       });
 
       return res
         .status(200)
         .json({ success: true, message: "📧 ส่งลิงก์รีเซ็ตรหัสผ่านไปยังอีเมลเรียบร้อยแล้ว", statusCode: 200 });
-    } catch (error) {
-      console.error("ForgotPassword error:", error);
+
+    } catch (error: any) {
+      console.error("ForgotPassword error:", error?.message || error);
       return res
         .status(500)
         .json({ success: false, message: "เกิดข้อผิดพลาดในการส่งอีเมล", statusCode: 500 });
@@ -278,7 +283,7 @@ export default class logininController {
       }
 
       const [rows] = await pool.query<any[]>(
-        "SELECT users_id FROM users WHERE reset_token = ? AND reset_token_expire > NOW() LIMIT 1",
+        "SELECT id FROM accounts WHERE reset_token = ? AND reset_token_expire > NOW() LIMIT 1",
         [token]
       );
 
@@ -288,11 +293,11 @@ export default class logininController {
           .json({ success: false, message: "ลิงก์ไม่ถูกต้องหรือหมดอายุแล้ว", statusCode: 200 });
       }
 
-      const userId = rows[0].users_id;
+      const userId = rows[0].id;
       const hashedPassword = await bcrypt.hash(password, 10);
 
       await pool.query(
-        "UPDATE users SET password = ?, reset_token = NULL, reset_token_expire = NULL WHERE users_id = ?",
+        "UPDATE accounts SET password = ?, reset_token = NULL, reset_token_expire = NULL WHERE id = ?",
         [hashedPassword, userId]
       );
 
@@ -319,7 +324,7 @@ export default class logininController {
       }
 
       const [rows] = await pool.query<any[]>(
-        "SELECT users_id FROM users WHERE reset_token = ? AND reset_token_expire > NOW() LIMIT 1",
+        "SELECT id FROM accounts WHERE reset_token = ? AND reset_token_expire > NOW() LIMIT 1",
         [token]
       );
 

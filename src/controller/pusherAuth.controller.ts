@@ -42,8 +42,9 @@ export default class pusherAuthController {
     };
     //#endregion
 
-    //#region [Chat Send via Pusher + Save DB]
+    //#region Chat Send
     sendChat = async (req: Request, res: Response<ApiResponse>) => {
+        // ตรวจสอบสิทธิ์
         const user = (req.session as any).user as SessionUser | undefined;
         if (!user) return res.status(401).json({ success: false, message: "Not authenticated", statusCode: 401 });
 
@@ -51,14 +52,15 @@ export default class pusherAuthController {
         if (typeof room !== "string" || typeof text !== "string") {
             return res.status(400).json({ success: false, message: "Bad request", statusCode: 400 });
         }
-
-        const isPresence = /^presence-[A-Za-z0-9_\-:.=,]+$/.test(room);
+        // ห้องรวม
+        const isPresence = false
+        // ห้องเดี่ยว
         const isDM = /^private-chat-\d+-\d+$/.test(room);
-        if (!isPresence && !isDM) {
+        if (!isDM) {
             return res.status(400).json({ success: false, message: "Invalid room", statusCode: 400 });
         }
 
-        // 1) หา conversation_id
+        // การสนทนา
         let conversationId: number | null = null;
 
         if (isDM) {
@@ -72,7 +74,7 @@ export default class pusherAuthController {
                 return res.status(403).json({ success: false, message: "Forbidden", statusCode: 403 });
             }
 
-            // ensure DM conversation exists
+            // ตรวจสอบให้แน่ใจว่ามีการสนทนา DM อยู่
             const conn = await pool.getConnection();
             try {
                 await conn.beginTransaction();
@@ -148,9 +150,14 @@ export default class pusherAuthController {
                 await conn.commit();
                 conn.release();
 
-                // 4) Trigger ไปยัง Pusher
-                const payload = { from: user.username, text: trimmed, at: Date.now() };
+                const payload = {
+                    from: user.username,
+                    sender_id: user.id,      
+                    text: trimmed,
+                    at: Date.now(),
+                };
                 await pusher.trigger(room, "message", payload);
+
 
                 return res.json({ success: true, message: "Message sent", statusCode: 200, data: { conversationId, messageId } });
             } catch (e) {
@@ -190,19 +197,22 @@ export default class pusherAuthController {
     //#endregion
 
     //#region getMessages
+    // getMessages (เวอร์ชันแก้ alias ซ้ำ)
     getMessages = async (req: Request, res: Response<ApiResponse>) => {
         const me = (req.session as any).user as SessionUser | undefined;
-        if (!me) return res.status(401).json({ success: false, message: "Not authenticated", statusCode: 401 });
+        if (!me) {
+            return res.status(401).json({ success: false, message: "Not authenticated", statusCode: 401 });
+        }
 
         const cid = Number((req.query as any).conversationId ?? 0);
-        const limit = Math.min(Number((req.query as any).limit ?? 50), 100);   // cap 100
-        const beforeId = Number((req.query as any).beforeId ?? 0);             // สำหรับ seek-pagination
+        const limit = Math.min(Number((req.query as any).limit ?? 50), 100);
+        const beforeId = Number((req.query as any).beforeId ?? 0);
 
         if (!cid) {
             return res.status(400).json({ success: false, message: "Bad request", statusCode: 400 });
         }
 
-        // เช็ค membership
+        // ตรวจ membership
         const [mem] = await pool.query<any[]>(
             `SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ? LIMIT 1`,
             [cid, me.id]
@@ -211,58 +221,59 @@ export default class pusherAuthController {
             return res.status(403).json({ success: false, message: "Forbidden", statusCode: 403 });
         }
 
-        // ใช้ seek-pagination: ดึงย้อนหลังก่อน message id ที่กำหนด
         const params: any[] = [cid];
         let cursorSql = "";
         if (beforeId > 0) {
             cursorSql = "AND m.id < ? ";
             params.push(beforeId);
         }
-
         params.push(limit);
 
-        // รวม attachments เป็น JSON array ต่อข้อความ
+        // ใช้ alias ไม่ซ้ำ: u=accounts, att=attachments
         const [rows] = await pool.query<any[]>(
             `
     SELECT
       m.id,
       m.conversation_id,
       m.sender_id,
+      u.username AS sender_username,
       m.body,
       m.kind,
       m.created_at,
       m.edited_at,
       COALESCE(
         JSON_ARRAYAGG(
-          CASE WHEN a.id IS NULL THEN NULL ELSE
+          CASE WHEN att.id IS NULL THEN NULL ELSE
             JSON_OBJECT(
-              'id', a.id,
-              'type', a.type,
-              'url', a.url,
-              'file_name', a.file_name,
-              'mime_type', a.mime_type,
-              'byte_size', a.byte_size,
-              'width', a.width,
-              'height', a.height,
-              'duration_sec', a.duration_sec
+              'id', att.id,
+              'type', att.type,
+              'url', att.url,
+              'file_name', att.file_name,
+              'mime_type', att.mime_type,
+              'byte_size', att.byte_size,
+              'width', att.width,
+              'height', att.height,
+              'duration_sec', att.duration_sec
             )
           END
         ),
         JSON_ARRAY()
       ) AS attachments
     FROM messages m
-    LEFT JOIN attachments a ON a.message_id = m.id
+    JOIN accounts u ON u.id = m.sender_id              -- << เปลี่ยนเป็น u
+    LEFT JOIN attachments att ON att.message_id = m.id -- << เปลี่ยนเป็น att
     WHERE m.conversation_id = ?
       AND m.deleted_at IS NULL
       ${cursorSql}
-    GROUP BY m.id
-    ORDER BY m.id DESC       -- ดึงย้อนหลัง (ล่าสุดก่อน)
+    GROUP BY
+      m.id, m.conversation_id, m.sender_id, u.username, m.body, m.kind, m.created_at, m.edited_at
+    ORDER BY m.id DESC
     LIMIT ?
     `,
             params
         );
 
-        // ให้ฝั่ง UI แสดงจากเก่า→ใหม่: reverse ที่นี่ให้เรียบง่าย
+        // เรียงกลับเป็นเก่า→ใหม่ให้ UI
         const messages = rows.reverse();
 
         return res.json({
@@ -272,7 +283,65 @@ export default class pusherAuthController {
             statusCode: 200,
         });
     };
+
     //#endregion
+
+    //#region getLastConversation
+    getLastConversation = async (req: Request, res: Response<ApiResponse>) => {
+        const me = (req.session as any).user as SessionUser | undefined;
+        if (!me) {
+            return res.status(401).json({ success: false, message: "Not authenticated", statusCode: 401 });
+        }
+
+        // หา “ห้องที่ผมเป็นสมาชิก” แล้วเรียงตามเวลาข้อความล่าสุด (ถ้าไม่มีข้อความใช้เวลาสร้างห้อง)
+        // กรณี DM ดึง peerId (สมาชิกอีกคน)
+        const [rows] = await pool.query<any[]>(
+            `
+  SELECT
+    c.id AS conversationId,
+    c.type AS type,
+    COALESCE(MAX(m.created_at), c.created_at) AS last_at,
+    (
+      SELECT cm2.user_id FROM conversation_members cm2
+      WHERE cm2.conversation_id = c.id AND cm2.user_id <> ?
+      LIMIT 1
+    ) AS peerId
+  FROM conversations c
+  JOIN conversation_members cm ON cm.conversation_id = c.id AND cm.user_id = ?
+  LEFT JOIN messages m ON m.conversation_id = c.id
+  WHERE c.type = 'dm'                  -- << สำคัญ
+  GROUP BY c.id
+  ORDER BY last_at DESC
+  LIMIT 1
+  `,
+            [me.id, me.id]
+        );
+
+        if (!rows || rows.length === 0) {
+            return res.json({ success: true, statusCode: 200, message: "OK", data: null });
+        }
+
+
+        const r = rows[0];
+        if (r.type === "dm" && r.peerId) {
+            return res.json({
+                success: true,
+                statusCode: 200,
+                message: "OK",
+                data: { kind: "dm", peerId: Number(r.peerId), conversationId: Number(r.conversationId) }
+            });
+        }
+
+        // type อื่น ๆ เช่น lobby / group
+        return res.json({
+            success: true,
+            statusCode: 200,
+            message: "OK",
+            data: { kind: "lobby", conversationId: Number(r.conversationId) }
+        });
+    };
+    //#endregion
+
 
     //#region resolveDM
     resolveDM = async (req: Request, res: Response<ApiResponse>) => {
@@ -327,7 +396,7 @@ export default class pusherAuthController {
     };
     //#endregion
 
-    //#region [List Users]
+    //#region ListUsers
     listUsers = async (req: Request, res: Response<ApiResponse>) => {
         const me = (req.session as any).user as SessionUser | undefined;
         if (!me) {
@@ -340,22 +409,22 @@ export default class pusherAuthController {
       id,
       username,
       COALESCE(firstname, '') AS firstname,
-      COALESCE(lastname, '')  AS lastname,
-      TRIM(CONCAT(COALESCE(firstname, ''), ' ', COALESCE(lastname, ''))) AS fullname
+      COALESCE(lastname, '')  AS lastname
     FROM accounts
     ORDER BY
       NULLIF(TRIM(COALESCE(firstname, '')), '') ASC,
-      NULLIF(TRIM(COALESCE(lastname,  '')), '') ASC,
+      NULLIF(TRIM(COALESCE(lastname,  '')), '')  ASC,
       id ASC
     `
         );
 
         return res.json({
             success: true,
-            data: { users: rows as any[] },
+            data: { users: rows },
             message: "OK",
             statusCode: 200,
         });
     };
     //#endregion
+
 }

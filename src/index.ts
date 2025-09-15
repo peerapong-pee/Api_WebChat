@@ -94,12 +94,14 @@ const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
 const pusherAuthLimiter = rateLimit({
   windowMs: 60_000,
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
 });
+
 app.use(Routes);
 app.use("/pusher/auth", pusherAuthLimiter);
 
